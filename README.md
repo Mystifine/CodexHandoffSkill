@@ -7,7 +7,17 @@ Lets Claude Code act as director while the local Codex CLI does decided executio
 git clone https://github.com/Mystifine/CodexHandoffSkill.git ~/.claude/skills/codex-handoff
 bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --check
 ```
-Claude Code discovers the skill automatically. Optionally add a line to your `~/.claude/CLAUDE.md` asking Claude to route work through it proactively.
+Claude Code discovers the skill automatically, but only invokes it when a task obviously matches its description.
+
+**Recommended:** make handoff the default by adding this snippet to your global `~/.claude/CLAUDE.md`. SKILL.md can't do this for you, because Claude reads it only after the skill has triggered.
+
+```markdown
+# codex-handoff
+- **codex-handoff** (`~/.claude/skills/codex-handoff/SKILL.md`) - delegate decided execution work to the local Codex CLI to save Claude tokens. Trigger: proactively, or `/codex-handoff`.
+Route code changes beyond small edits, UI built from a Claude-written spec, image generation, 3D/Blender work, animation and bulk mechanical work through Codex. Claude stays the director: it decides, writes the exact brief and reviews every result. Claude does small edits itself when a brief would cost as much. Load the skill before the first handoff in a session.
+```
+
+Codex never reads `CLAUDE.md`; it follows the project's `AGENTS.md` and the brief.
 
 ## Requirements
 - Claude Code, with this folder at `~/.claude/skills/codex-handoff/`.
