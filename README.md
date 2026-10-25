@@ -24,11 +24,15 @@ Prerequisites: Claude Code, Git, Node.js 18+, and Bash. On Windows use **Git Bas
 
    If that destination already exists, update the existing installation instead of cloning over it. The installer merges rules into `~/.claude/settings.json` (or `CLAUDE_CONFIG_DIR/settings.json`), preserves unrelated settings and the permission mode, and can be rerun safely. Invalid JSON is left unchanged. It adds the wrapper's Bash permission and auto-mode classifier rule; it does not enable `bypassPermissions` or switch Claude into auto mode. Existing deny rules or managed policy may still require administrator/user action. Inspect installed rules with `/permissions`.
 
-3. For proactive routing, optionally add this once to `~/.claude/CLAUDE.md`:
+3. Nothing else is required. The installer only merges the permission rules above. It never reads or edits `CLAUDE.md`, `AGENTS.md` or any other instruction file, and neither does the skill. Claude finds the skill from its description and uses it for substantial work or when you ask (`/codex-handoff`, "hand this off to Codex").
+
+   Routing policy stays yours. If you want Claude to delegate more proactively, write your own rule in a project's `CLAUDE.md` (one project) or `~/.claude/CLAUDE.md` (every project). For example:
 
    ```markdown
-   Use ~/.claude/skills/codex-handoff/SKILL.md for substantial decided implementation, UI construction from a spec, images, Blender/animation, and bulk mechanical work. Claude decides and reviews; do small edits directly when delegation costs as much. Load the skill before the first handoff.
+   Use the codex-handoff skill for substantial decided implementation, UI built from a spec, images, Blender/animation and bulk mechanical work. Claude decides and reviews; do small edits directly when delegation costs as much.
    ```
+
+   Leave it out if you'd rather invoke handoffs yourself, have no Codex plan, or often hit Codex limits.
 
 4. Configure needed MCP servers once in Codex, using `codex mcp` or Codex's config files. Check them with `codex mcp list --json`. Claude integrations and skills are not automatically copied into Codex. Enable relevant skills/apps in Codex separately.
 
