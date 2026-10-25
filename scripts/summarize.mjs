@@ -105,6 +105,11 @@ export async function summarize(runDir, codexExit, start, end, cwd = '') {
     }
   }
   const seconds = Math.max(0, end - start), out = [`Codex handoff: ${status} (codex exit ${codexExit}) in ${Math.floor(seconds / 60)}m${seconds % 60}s`];
+  let checkpoint = '';
+  try {
+    const saved = readJson(path.join(runDir, 'checkpoint.json'));
+    if (saved) checkpoint = `${Array.isArray(saved.done) ? saved.done.length : 0} step(s) done${Array.isArray(saved.done) && saved.done.length ? ` (last: ${String(saved.done.at(-1)).slice(0, 160)})` : ''}; next: ${String(saved.next || '?').slice(0, 240)}`;
+  } catch { checkpoint = 'checkpoint.json is invalid'; }
   const resumable = { ...invocation, cwd: invocation.cwd || cwd };
   const pending = limitHit && !invocation.probe ? resumeCommand(resumable, runDir, threadId) : '';
   if (threadId) out.push(`thread: ${threadId}`, `follow-up: ${resumeCommand(resumable, runDir, threadId, '<follow-up brief>')}`);
@@ -116,10 +121,15 @@ export async function summarize(runDir, codexExit, start, end, cwd = '') {
     if (entries.length) out.push(`${title}:`, ...entries.slice(0, max).map((entry) => `  ${entry}`), ...(entries.length > max ? [`  ... ${entries.length - max} more`] : []));
   };
   const changes = read('git-changes.txt').trim();
-  if (changes) { capped('checkout changes during run (includes concurrent external edits)', changes.split('\n'), 40); out.push(`review patch: ${path.join(runDir, 'changes.patch')}`); }
+  if (changes) {
+    capped('checkout changes during run (includes concurrent external edits)', changes.split('\n'), 40);
+    const patch = path.join(runDir, 'changes.patch'), mb = fs.existsSync(patch) ? fs.statSync(patch).size / 1e6 : 0, trees = readJson(path.join(runDir, 'trees.json'), {});
+    out.push(`review patch: ${patch}${mb > 2 ? ` (${mb.toFixed(1)} MB including binary content; for text only: git -C "${cwd}" diff ${trees.before} ${trees.after} -- <paths>)` : ''}`);
+  }
   else capped('tool-reported file changes', [...files]);
   if (read('snapshot-error.txt')) out.push(`snapshot failed: ${read('snapshot-error.txt')}`);
   if (!invocation.probe && !validResult) out.push('result.json missing or invalid; completion is unconfirmed.');
+  if (checkpoint) out.push(`checkpoint: ${checkpoint}`);
   if (validResult) out.push(`verification: ${result.verification}`, ...(result.reason ? [`remaining work: ${result.reason}`] : []));
   if (mcp.size) out.push(`mcp calls: ${[...mcp].map(([key, count]) => `${key} x${count}`).join(', ')}`);
   capped('generated image originals', images);
@@ -144,7 +154,7 @@ export async function summarize(runDir, codexExit, start, end, cwd = '') {
       if ((threadId && entry.thread === threadId) || (!entry.thread && invocation.brief && path.resolve(invocation.brief) === path.resolve(entry.runDir, 'brief.md'))) delete state.pending[key];
     }
     if (pending) state.pending[threadId || runDir] = { account: invocation.accountKey || 'legacy', until: limitUntil, thread: threadId, runDir, project,
-      goal: briefGoal(read('brief.md')), note: invocation.note || '', command: pending };
+      goal: briefGoal(read('brief.md')), note: invocation.note || '', checkpoint, command: pending };
     writeJson(stateFile(root), state);
     writeJson(path.join(runDir, 'meta.json'), { status, codexExit, threadId, seconds, usage, files: [...files], images, errors, result });
     atomicWrite(path.join(runDir, 'summary.txt'), text + '\n');

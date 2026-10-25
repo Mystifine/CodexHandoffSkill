@@ -35,7 +35,11 @@ Write the brief to a unique scratch file; omit empty sections:
                    scratch in run dir; if ambiguity changes the decided design report blocked,
                    else choose conservatively and note it>
 ## Verification   <commands, invariants, QA; visual work: labeled contact sheet <= 1600 px>
+## Phases         <for work over ~45 min or several deliverables: numbered phases, each
+                   independently verifiable>
 ```
+
+Codex overwrites `checkpoint.json` in the run directory after each phase. Summaries, pending resumes and resumed runs carry it forward, so a limit or timeout costs at most one phase.
 
 ## 3. Launch in the background
 
@@ -56,7 +60,7 @@ The summary shows status, thread, directory, usage, verification claim, changed 
 - **Fix round:** brief concrete defects with expected results and resume. Same defect after two attempts: fix it yourself.
 - **Post-change steps:** after all accepted work is integrated (merges, fix rounds, your own edits), do the project's end-of-task steps from CLAUDE.md/AGENTS.md once in the main checkout, unless they assign them to Codex.
 - **Notes:** save reusable approved briefs in the project directory's `templates/`; add a one-line rule to `LESSONS.md` for a demonstrated mistake.
-- **Clean:** `bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --clean <thread> [--claude-tokens N]` (measured usage only). It preserves worktrees and refuses active threads. Delete only scratch positively attributed to the task.
+- **Clean:** `bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --clean <thread>` once the task is accepted. It logs the task's Codex and Claude usage to the project's `usage.tsv`. Claude usage comes from the launching sessions' transcripts since the first run, so it includes any unrelated work done in that window; mention that when reporting savings. It preserves worktrees and refuses active threads. Delete only scratch positively attributed to the task.
 - Tell the user what changed, how it was verified, and what remains.
 
 Files live in `~/.claude/codex-handoffs` (`CODEX_HANDOFF_HOME`), per project keyed by canonical repo path; runs print the exact directory. Exit codes: 0 ok/ready; 1 failed; 2 usage limit; 3 timeout; 4 blocked/cancelled/needs review; 64 arguments; 69 CLI/config; 70 login; 71 model; 75 busy. On failure read only the summary and relevant log tails.

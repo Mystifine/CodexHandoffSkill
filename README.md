@@ -60,11 +60,15 @@ Resume with `--resume THREAD --cd "/original/worktree"`, repeating needed MCP/re
 
 A run that hits a usage limit records a pending resume in the handoff state. It holds the exact resume command, the brief's goal, and the director's `--note TEXT` (next steps and authorized scope). Reset times are read from the stated delay, date or local clock time ("try again at 5:01 PM"). `handoff.sh --wait`, run in the background, holds no reservation and polls the recorded limit. Once the limit resets it prints every ready resume, so the job continues even if the director's context was cleared. `--check` lists pending resumes as well. The next run of the same job, with any outcome, replaces its record; `--clean THREAD` drops it.
 
+### Checkpoints
+
+Codex is told to overwrite `checkpoint.json` in its run directory after each phase or major milestone, with the steps done, the next step, and any notes a resume needs. Summaries and pending resumes show it, and a resume copies the thread's latest checkpoint into the new run, so long work split into `## Phases` loses at most one phase to a limit or timeout.
+
 ## Results and recovery
 
 The wrapper requests a structured `result.json` alongside the human report. Exit 0 requires a completed turn and explicit task completion (or an exact readiness reply for `--check`). Missing/invalid results, snapshot failures, declared blockers, and detected sandbox/approval failures are unaccepted. Nonzero intermediate commands can be recovered during the same task; Claude still verifies the final result.
 
-The review patch captures before/after Git trees, including content of already-untracked files, without changing the real index or stash. It includes any human/external edits made in that checkout during the run. Ignored files and writes outside the checkout are outside this snapshot. Review such authorized changes separately. This is review evidence, not proof of who authored each edit or that the task is correct.
+The review patch captures before/after Git trees, including content of already-untracked files, without changing the real index or stash. It streams to disk, so binary-heavy runs (`.blend` files, textures) are not limited by memory buffers; past 2 MB the summary prints a text-only `git diff` command for the same trees. It includes any human/external edits made in that checkout during the run. Ignored files and writes outside the checkout are outside this snapshot. Review such authorized changes separately. This is review evidence, not proof of who authored each edit or that the task is correct.
 
 | Exit | Meaning and next step |
 |---|---|
@@ -85,7 +89,7 @@ Readiness probes are cached for 12 hours per configuration/CLI version. Model fa
 
 State lives in `~/.claude/codex-handoffs` (`CODEX_HANDOFF_HOME` override). Use the **same handoff home** across cooperating sessions so locks are shared. Repository paths are canonicalized and hashed to avoid same-name project collisions; worktrees from one repository share project notes and accounting. The printed project directory contains `templates/`, `LESSONS.md`, `ledger.tsv`, `tasks.tsv`, and unique run directories. Legacy project `LESSONS.md` is read when no new-path lessons exist; old accounting remains untouched.
 
-Successful runs remove their raw event/stderr logs after saving a compact summary, task metadata, and patch. Unaccepted runs retain diagnostics. Finish review before `--clean THREAD [--claude-tokens N]`; cleanup refuses active threads, preserves worktrees, and records provided Claude usage without inventing measurements. Old completed run artifacts are pruned after three days on subsequent launches; active/unfinished runs and worktrees are preserved. Leave Codex's session history alone.
+Successful runs remove their raw event/stderr logs after saving a compact summary, task metadata, and patch. Unaccepted runs retain diagnostics. Finish review before `--clean THREAD`. Cleanup refuses active threads and preserves worktrees. It appends the task's usage to the project's `usage.tsv`: Codex tokens from the run metadata, plus Claude input, cache-write, cache-read and output tokens. The Claude figures are measured from the launching sessions' transcripts (including subagents) from the first run onward, deduplicated by message. They count everything those sessions did in that window, so unrelated work inflates them. `--claude-tokens N` records a manual figure alongside. (`tasks.tsv` from older versions is left as is.) Old completed run artifacts are pruned after three days on subsequent launches; active/unfinished runs and worktrees are preserved. Leave Codex's session history alone.
 
 To update a Git-cloned global installation:
 
@@ -97,4 +101,4 @@ bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --check
 
 If you maintain a separate source repository (for example `Documents/CodexHandoffSkill`) and a copied global installation, edit and commit the source repository, then copy its `SKILL.md`, `README.md`, `scripts/`, and `references/` to the global installation. Do not copy `.git`, test output, or project-specific runtime state. Do not modify either installation during ordinary handoffs; propose maintenance separately.
 
-Maintainer verification: `node --test`. The suite uses temporary repositories and a fake CLI to exercise simultaneous launches, worktree isolation, resource locks, usage-limit races, cancellation/timeout, status classification, installer merging, and review patches without consuming model usage or touching live apps. A prior single-panel UI experiment observed 40–47% fewer director tokens with exact specs; broader savings and parallel speedups are not established by that experiment.
+Maintainer verification: `node --test`. The suite uses temporary repositories and a fake CLI to exercise simultaneous launches, worktree isolation, resource locks, usage-limit races, cancellation/timeout, status classification, installer merging, review patches larger than memory buffers, checkpoint carry-over, pending resumes and usage measurement without consuming model usage or touching live apps. A prior single-panel UI experiment observed 40–47% fewer director tokens with exact specs; broader savings and parallel speedups are not established by that experiment.

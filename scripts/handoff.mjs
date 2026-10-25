@@ -6,7 +6,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { alive, atomicWrite, canonical, inside, liveReservations, loadState, release, reserve,
-  safeRemove, stateFile, updateReservation, withLock, writeJson } from './state.mjs';
+  readJson, safeRemove, stateFile, updateReservation, withLock, writeJson } from './state.mjs';
 import { checkout, finishSnapshot, git, snapshot } from './snapshot.mjs';
 import { summarize } from './summarize.mjs';
 import { cleanup } from './cleanup.mjs';
@@ -174,7 +174,7 @@ function pendingResumes(state) {
     .map((entry) => ({ ...entry, until: Math.max(entry.until || 0, state.limits[entry.account]?.until || 0) }));
 }
 const describePending = (entry) => [`== ${entry.thread ? `thread ${entry.thread}` : 'unstarted run'} (${path.basename(entry.project)})`,
-  `goal: ${entry.goal || '(see brief)'}`, ...(entry.note ? [`next: ${entry.note}`] : []), `paused run: ${entry.runDir}`, `resume: ${entry.command}`].join('\n');
+  `goal: ${entry.goal || '(see brief)'}`, ...(entry.checkpoint ? [`codex progress: ${entry.checkpoint}`] : []), ...(entry.note ? [`next: ${entry.note}`] : []), `paused run: ${entry.runDir}`, `resume: ${entry.command}`].join('\n');
 // Holds no reservation, so other handoffs run normally while a timer waits.
 async function waitForReset(root) {
   for (;;) {
@@ -273,7 +273,16 @@ export async function main(argv = process.argv.slice(2)) {
     writeJson(path.join(runDir, 'invocation.json'), { root, project, cwd, ...info, sandbox: options.check ? 'read-only' : options.sandbox, probe: !!options.check, resume: options.resume || null, mcp: options.mcp,
       // Everything resumeCommand needs to rebuild this launch.
       brief: options.brief, resource: options.resource, addDir: options.addDir, image: options.image, model: options.model,
-      effort: options.effort, timeoutMin: options.timeoutMin, name: options.name, note: options.note });
+      effort: options.effort, timeoutMin: options.timeoutMin, name: options.name, note: options.note,
+      claudeSession: process.env.CLAUDE_CODE_SESSION_ID || null, startedAt: Date.now() });
+    // A resume continues from the thread's latest checkpoint, so a limit or timeout loses at most one phase.
+    const checkpoint = path.join(runDir, 'checkpoint.json');
+    if (options.resume) {
+      const previous = fs.readdirSync(project).filter((entry) => /^\d{8}-\d{6}-/.test(entry)).sort().reverse()
+        .map((entry) => path.join(project, entry)).find((dir) => dir !== runDir && fs.existsSync(path.join(dir, 'checkpoint.json')) &&
+          readJson(path.join(dir, 'meta.json'))?.threadId === options.resume);
+      if (previous) fs.copyFileSync(path.join(previous, 'checkpoint.json'), checkpoint);
+    }
     if (!options.check) {
       fs.copyFileSync(options.brief, path.join(runDir, 'brief.md'));
       if (checkout(cwd)) { before = snapshot(cwd, runDir, 'before'); atomicWrite(path.join(runDir, 'base.txt'), before); }
@@ -284,6 +293,8 @@ export async function main(argv = process.argv.slice(2)) {
     const prompt = options.check ? 'Reply with exactly the two letters "OK", without punctuation. Do not use tools.' :
       `Read ${path.join(runDir, 'brief.md')} and carry out the brief. Follow project AGENTS.md.${fs.existsSync(lessonsFile) ? ` Read standing lessons at ${lessonsFile}.` : ''} ` +
       `The working directory is ${cwd}. Keep scratch and review media in ${runDir}. ` +
+      (fs.existsSync(checkpoint) ? `Your last checkpoint is ${checkpoint}; continue from it. ` : '') +
+      `After each phase in the brief (or each major milestone), overwrite ${checkpoint} with JSON {"done":["finished and verified steps"],"next":"the next step","notes":"state a resume needs"}. ` +
       `Finish with a report under 250 words and write ${path.join(runDir, 'result.json')} as JSON: ` +
       '{"status":"completed|blocked|failed","verification":"checks run and results","reason":"remaining work or empty"}. ' +
       'Use completed only when every requirement and required verification is satisfied. A tool/sandbox failure that prevents finishing means blocked. Do not change setup, permissions, or sandbox to get around a failure.';

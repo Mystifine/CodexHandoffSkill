@@ -30,6 +30,9 @@ if(process.env.FAKE_CHILD) {
  fs.writeFileSync(process.env.FAKE_CHILD,String(child.pid));
 }
 await new Promise(r=>setTimeout(r,Number(process.env.FAKE_DELAY||0)));
+if(process.env.FAKE_HOLD) while(!fs.existsSync(process.env.FAKE_HOLD)) await new Promise(r=>setTimeout(r,25));
+if(process.env.FAKE_CHECKPOINT) fs.writeFileSync(path.join(dir,'checkpoint.json'),JSON.stringify({done:['phase 1 textures'],next:'phase 2 review sheets'}));
+if(process.env.FAKE_EDIT_BYTES) fs.writeFileSync(path.join(process.cwd(),'large.bin'),crypto.randomBytes(Number(process.env.FAKE_EDIT_BYTES)));
 if(scenario==='limit') {console.log(JSON.stringify({type:'error',message:"You've hit your usage limit. Try again in 1 second."}));process.exit(1);}
 if(scenario==='model-missing'&&!args.includes('fallback-a')) {console.log(JSON.stringify({type:'error',message:'model_not_found'}));process.exit(1);}
 const probe=args.some(a=>a.includes('the two letters "OK"'));
@@ -66,7 +69,7 @@ function fixture(t) {
     invocations: () => fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [] };
 }
 async function until(check, message) {
-  const end = Date.now() + 10000;
+  const end = Date.now() + 30000;
   while (Date.now() < end) { if (check()) return; await sleep(25); }
   assert.fail(message);
 }
@@ -115,10 +118,11 @@ test('usage limit resets honor stated delays, dates and local clock times', () =
 test('a usage limit records a runnable resume that --wait replays and the next run clears', async (t) => {
   const f = fixture(t), note = "review the sheets, then run verify (user's approval: resume as-is)";
   const words = (command) => [...command.matchAll(/'((?:[^']|'\\'')*)'|(\S+)/g)].map((m) => m[1] !== undefined ? m[1].replaceAll("'\\''", "'") : m[2]);
-  const limited = await f.launch([...f.args, '--mcp', 'blender', '--note', note], { FAKE_SCENARIO: 'limit', FAKE_SERVERS: '[{"name":"blender"}]' }).done;
+  const limited = await f.launch([...f.args, '--mcp', 'blender', '--note', note], { FAKE_SCENARIO: 'limit', FAKE_SERVERS: '[{"name":"blender"}]', FAKE_CHECKPOINT: '1' }).done;
   assert.equal(limited.code, 2, limited.stderr);
   const [entry] = Object.values(loadState(f.root).pending);
   assert.match(limited.stdout, /resume after reset: bash /);
+  assert.match(entry.checkpoint, /^1 step\(s\) done \(last: phase 1 textures\); next: phase 2 review sheets$/);
   assert.equal(entry.goal, 'Perform the fixture task.');
   const argv = words(entry.command).slice(2), resumed = parse(argv);
   assert.equal(resumed.resume, entry.thread); assert.equal(resumed.note, note); assert.deepEqual(resumed.mcp, ['blender']);
@@ -127,19 +131,51 @@ test('a usage limit records a runnable resume that --wait replays and the next r
   assert.equal(loadState(f.root).reservations.length, 0);
   const woke = await waiting.done;
   assert.equal(woke.code, 0, woke.stderr);
-  assert.ok(woke.stdout.includes(`next: ${note}`) && woke.stdout.includes(`resume: ${entry.command}`));
+  assert.ok(woke.stdout.includes(`next: ${note}`) && woke.stdout.includes(`resume: ${entry.command}`) && woke.stdout.includes('codex progress: 1 step(s)'));
   const again = await f.launch(argv, { FAKE_SERVERS: '[{"name":"blender"}]' }).done;
   assert.equal(again.code, 0, again.stdout + again.stderr);
+  const resumedCall = f.invocations().at(-1);
+  assert.ok(resumedCall.args.some((arg) => arg.includes('Your last checkpoint is')));
+  assert.equal(readJson(path.join(resumedCall.dir, 'checkpoint.json')).next, 'phase 2 review sheets');
   assert.deepEqual(loadState(f.root).pending, {});
   assert.equal((await f.launch(['--wait']).done).code, 1);
+});
+test('review patches larger than any memory buffer are written to disk', async (t) => {
+  const f = fixture(t); initRepo(f.cwd);
+  const run = await f.launch(f.args, { FAKE_EDIT_BYTES: String(20 * 1024 * 1024) }).done;
+  assert.equal(run.code, 0, run.stdout + run.stderr);
+  const dir = f.invocations()[0].dir;
+  assert.equal(fs.existsSync(path.join(dir, 'snapshot-error.txt')), false);
+  assert.ok(fs.statSync(path.join(dir, 'changes.patch')).size > 20 * 1024 * 1024);
+  assert.match(run.stdout, /MB including binary content; for text only: git -C/);
+});
+test('task cleanup measures director usage from session transcripts since the first run', async (t) => {
+  const f = fixture(t), config = path.join(f.dir, 'claude'), start = Date.now() - 60000;
+  const runDir = reportFixture(f, 'measured', [done], result);
+  writeJson(path.join(runDir, 'invocation.json'), { root: f.root, project: path.join(f.root, 'project'), claudeSession: 'director', startedAt: start });
+  writeJson(path.join(runDir, 'meta.json'), { threadId: 'task', usage: { input_tokens: 50, cached_input_tokens: 20, output_tokens: 5 } });
+  const message = (id, at, usage) => JSON.stringify({ type: 'assistant', timestamp: new Date(at).toISOString(), message: { id, usage } });
+  const usage = { input_tokens: 3, cache_creation_input_tokens: 100, cache_read_input_tokens: 1000, output_tokens: 10 };
+  fs.mkdirSync(path.join(config, 'projects', 'p', 'director', 'subagents'), { recursive: true });
+  fs.writeFileSync(path.join(config, 'projects', 'p', 'director.jsonl'), [message('old', start - 1000, usage), message('a', start + 1000, usage), message('a', start + 1000, usage), '{"type":"user"}'].join('\n'));
+  fs.writeFileSync(path.join(config, 'projects', 'p', 'director', 'subagents', 'agent.jsonl'), message('b', start + 2000, usage));
+  const saved = { config: process.env.CLAUDE_CONFIG_DIR, session: process.env.CLAUDE_CODE_SESSION_ID };
+  process.env.CLAUDE_CONFIG_DIR = config; delete process.env.CLAUDE_CODE_SESSION_ID;
+  t.after(() => { for (const [key, name] of [['config', 'CLAUDE_CONFIG_DIR'], ['session', 'CLAUDE_CODE_SESSION_ID']]) if (saved[key] === undefined) delete process.env[name]; else process.env[name] = saved[key]; });
+  await cleanup(f.root, '--thread', 'task');
+  const [header, row] = fs.readFileSync(path.join(f.root, 'project', 'usage.tsv'), 'utf8').trim().split('\n').map((line) => line.split('\t'));
+  const record = Object.fromEntries(header.map((name, i) => [name, row[i]]));
+  assert.deepEqual([record.codex_input, record.claude_input, record.claude_cache_write, record.claude_cache_read, record.claude_output, record.claude_messages],
+    ['50', '6', '200', '2000', '20', '2']);
 });
 test('simultaneous summaries preserve the longest limit and every ledger row', async (t) => {
   const f = fixture(t), now = Math.floor(Date.now() / 1000);
   const dirs = Array.from({ length: 12 }, (_, i) => reportFixture(f, `summary-${i}`,
     i < 2 ? [{ type: 'error', message: `usage limit: try again in ${i === 0 ? 60 : 5} minutes` }] : [done], i < 2 ? null : result));
   await Promise.all(dirs.map((dir, i) => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [path.join(scripts, 'summarize.mjs'), dir, i < 2 ? '1' : '0', String(now), String(now), f.cwd], { env: f.env, stdio: 'ignore' });
-    child.on('error', reject); child.on('close', (code) => code === (i < 2 ? 2 : 0) ? resolve() : reject(new Error(`summary ${i} exit ${code}`)));
+    const child = spawn(process.execPath, [path.join(scripts, 'summarize.mjs'), dir, i < 2 ? '1' : '0', String(now), String(now), f.cwd], { env: f.env, stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = ''; child.stderr.on('data', (data) => { stderr += data; });
+    child.on('error', reject); child.on('close', (code) => code === (i < 2 ? 2 : 0) ? resolve() : reject(new Error(`summary ${i} exit ${code}: ${stderr}`)));
   })));
   assert.equal(loadState(f.root).limits.account.until, now + 3600);
   const rows = fs.readFileSync(path.join(f.root, 'project', 'ledger.tsv'), 'utf8').trim().split('\n');
@@ -200,11 +236,13 @@ test('independent worktrees run concurrently and retain reviewable results', asy
 });
 test('app resources and resumed threads are exclusive across separate directories', async (t) => {
   const f = fixture(t), other = path.join(f.dir, 'other'); fs.mkdirSync(other);
-  for (const option of [['--resource', 'blender'], ['--resume', 'same-thread']]) {
-    const first = f.launch([...f.args, ...option], { FAKE_DELAY: '1500' });
+  for (const [i, option] of [['--resource', 'blender'], ['--resume', 'same-thread']].entries()) {
+    const hold = path.join(f.dir, `hold-${i}`);
+    const first = f.launch([...f.args, ...option], { FAKE_HOLD: hold });
     const expected = f.invocations().length + 1;
     await until(() => f.invocations().length >= expected, 'resource owner did not start');
     const second = await f.launch(['--brief', f.brief, '--cd', other, ...option]).done;
+    fs.writeFileSync(hold, '');
     assert.equal(second.code, 75, second.stderr); assert.equal((await first.done).code, 0);
   }
 });
@@ -243,11 +281,13 @@ test('MCP is disabled with a valid inert transport by default and enabled server
   const args = f.invocations()[0].args;
   assert.ok(args.includes('mcp_servers.blender={command="__codex_handoff_disabled__",enabled=false}'));
   assert.ok(args.includes('mcp_servers.host-tool={command="__codex_handoff_disabled__",enabled=false}'));
-  const first = f.launch([...f.args, '--mcp', 'blender'], { FAKE_SERVERS: servers, FAKE_DELAY: '1500' });
+  const hold = path.join(f.dir, 'hold');
+  const first = f.launch([...f.args, '--mcp', 'blender'], { FAKE_SERVERS: servers, FAKE_HOLD: hold });
   await until(() => f.invocations().length === 2, 'MCP owner did not start');
   assert.ok(f.invocations()[1].args.includes('mcp_servers.blender.enabled=true'));
   const other = path.join(f.dir, 'other'); fs.mkdirSync(other);
   const second = await f.launch(['--brief', f.brief, '--cd', other, '--resource', 'blender'], { FAKE_SERVERS: servers }).done;
+  fs.writeFileSync(hold, '');
   assert.equal(second.code, 75, second.stderr); assert.equal((await first.done).code, 0);
 });
 test('readiness probes cache by effective configuration and explicit model', async (t) => {

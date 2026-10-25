@@ -13,12 +13,18 @@ export const alive = (pid) => {
   try { process.kill(pid, 0); return true; }
   catch (error) { return error.code === 'EPERM'; }
 };
+// Windows reports a file that another process is deleting or briefly reading as EPERM/EBUSY/EACCES.
+const transient = (error) => process.platform === 'win32' && ['EPERM', 'EBUSY', 'EACCES'].includes(error.code);
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 export function atomicWrite(file, text, mode = 0o600) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
     fs.writeFileSync(temp, text, { flag: 'wx', mode });
-    fs.renameSync(temp, file);
+    for (let attempt = 0; ; attempt++) {
+      try { fs.renameSync(temp, file); break; }
+      catch (error) { if (!transient(error) || attempt >= 40) throw error; pause(50); }
+    }
   } finally { fs.rmSync(temp, { force: true }); }
 }
 export const writeJson = (file, value) => atomicWrite(file, `${JSON.stringify(value, null, 2)}\n`);
@@ -50,18 +56,20 @@ export async function withLock(dir, fn, timeoutMs = 15000) {
       fd = fs.openSync(file, 'wx', 0o600);
       fs.writeFileSync(fd, JSON.stringify(owner));
     } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
+      // A lock created here but not yet written is ours to discard before retrying.
+      if (fd !== undefined) { fs.closeSync(fd); fd = undefined; fs.rmSync(file, { force: true, maxRetries: 5, retryDelay: 20 }); }
+      if (error.code !== 'EEXIST' && !transient(error)) throw error;
       // One reaper at a time; recheck the current owner while holding the reaper lock.
       const reaper = `${file}.reaper`;
       let reapFd;
       try {
         reapFd = fs.openSync(reaper, 'wx', 0o600);
         let held;
-        try { held = readJson(file); } catch (parseError) { if (!(parseError instanceof SyntaxError)) throw parseError; }
+        try { held = readJson(file); } catch (parseError) { if (!(parseError instanceof SyntaxError) && !transient(parseError)) throw parseError; }
         // Another process may have just created the file and not written its PID.
         if ((held && !alive(held.pid)) || (!held && fs.existsSync(file) && Date.now() - fs.statSync(file).mtimeMs > 30000)) fs.rmSync(file, { force: true });
       } catch (reapError) {
-        if (!['EEXIST', 'ENOENT'].includes(reapError.code)) throw reapError;
+        if (!['EEXIST', 'ENOENT'].includes(reapError.code) && !transient(reapError)) throw reapError;
       } finally {
         if (reapFd !== undefined) { fs.closeSync(reapFd); fs.rmSync(reaper, { force: true }); }
       }
@@ -75,7 +83,7 @@ export async function withLock(dir, fn, timeoutMs = 15000) {
   try { return await fn(); }
   finally {
     fs.closeSync(fd);
-    if (readJson(file)?.token === owner.token) fs.rmSync(file, { force: true });
+    if (readJson(file)?.token === owner.token) fs.rmSync(file, { force: true, maxRetries: 5, retryDelay: 20 });
   }
 }
 
