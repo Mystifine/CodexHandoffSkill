@@ -2,6 +2,13 @@
 
 Lets Claude Code act as director while the local Codex CLI does decided execution work: code, UI built from Claude's spec, images, 3D/Blender, animation and bulk chores. Claude writes the brief and reviews the result; Codex spends its own budget. `SKILL.md` is what Claude reads; this file is for people installing it.
 
+## Install
+```bash
+git clone https://github.com/Mystifine/CodexHandoffSkill.git ~/.claude/skills/codex-handoff
+bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --check
+```
+Claude Code discovers the skill automatically. Optionally add a line to your `~/.claude/CLAUDE.md` asking Claude to route work through it proactively.
+
 ## Requirements
 - Claude Code, with this folder at `~/.claude/skills/codex-handoff/`.
 - Codex CLI on PATH (`npm i -g @openai/codex`) and logged in (`codex login`).
