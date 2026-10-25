@@ -89,9 +89,11 @@ Images: Codex saves originals under `~/.codex/generated_images/<thread>/`; give 
 ```bash
 bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --brief "<brief>" --cd "<project root>"
 ```
-Use `run_in_background: true`. The completion notification wakes you, so don't poll. While Codex works, do your share: the next spec, invariants, reviews.
+Use `run_in_background: true`, and run the wrapper as its own command exactly in this form (no `cd ... &&` prefix, no `~` expanded; pass paths with `--cd`/`--image`) so the user's permission rule for it matches. The completion notification wakes you, so don't poll. While Codex works, do your share: the next spec, invariants, reviews.
 
-Options: `--image <file>` (reference, repeatable) · `--add-dir <dir>` (extra writable dir) · `--resume <thread>` (follow-up in the same session; the brief is the follow-up) · `--cancel <run dir>` (stops Codex; killing the shell alone can leave it running) · `--sandbox danger-full-access` (only when `--add-dir` can't cover it) · `--timeout-min N` (default 180) · `--name <slug>` · `--model`/`--effort` (or `CODEX_HANDOFF_MODEL`/`CODEX_HANDOFF_EFFORT`) · `--ignore-limit`.
+Options: `--image <file>` (reference, repeatable) · `--add-dir <dir>` (extra writable dir) · `--resume <thread>` (follow-up in the same session; the brief is the follow-up) · `--cancel <run dir>` (stops Codex; killing the shell alone can leave it running) · `--sandbox MODE` (default `danger-full-access`; env `CODEX_HANDOFF_SANDBOX`; pass `workspace-write` to sandbox a run) · `--timeout-min N` (default 180) · `--name <slug>` · `--model`/`--effort` (or `CODEX_HANDOFF_MODEL`/`CODEX_HANDOFF_EFFORT`) · `--ignore-limit`.
+
+Sandbox: runs default to `danger-full-access`, because Codex's Windows `workspace-write` sandbox fails whenever another Codex process is running (see Exit codes). The user opted into this default by installing the skill; respect a `CODEX_HANDOFF_SANDBOX` override. Codex then has no sandbox, so the brief's Constraints are the only boundary: always list the forbidden actions and paths explicitly, and review the diff against the snapshot as usual. Parallel handoffs work in this mode.
 
 The wrapper auto-approves the tools of every MCP server in `~/.codex/config.toml` and the project's `.codex/config.toml`, since `codex exec` would otherwise reject them. Concurrency: parallel handoffs only on disjoint files; never two that use the same app (Blender, Studio), and don't drive that app yourself meanwhile.
 
@@ -109,6 +111,7 @@ The command prints a compact summary: status, thread, run dir, Codex tokens, rep
 
 ## Exit codes
 `0` ok · `1` failed (summary, then `stderr.log`) · `2` usage limit (reset time recorded; later launches refuse until then) · `3` timed out (resume with "continue where you stopped") · `64` bad arguments · `69` Codex missing · `70` not logged in · `71` no usable model. For 2, 69, 70 and 71, Claude does the work itself (see step 0).
+Windows sandbox failing: every shell command returns `helper_unknown_error: setup refresh had errors`, and Codex's sandbox log (`~/.codex/.sandbox/`) shows `node_repl.exe` "being used by another process". Another Codex process (another handoff, or the Codex app) holds that file, so the `workspace-write` sandbox can't set up. A run reporting this can still exit `0`, so read its report. Shell-free work (image generation, MCP) may still finish. This only affects runs launched with `--sandbox workspace-write`; for shell work, relaunch once the other Codex processes have exited, or relaunch with the default `danger-full-access`.
 MCP calls failing inside Codex: open and connect the app, then resume. "Requires approval, but approval policy is never" means the server is missing from the Codex configs the wrapper reads (see `mcp_approve=` in the run's `invocation.txt`).
 
 ## Cleanup

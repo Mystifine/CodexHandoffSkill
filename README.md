@@ -28,6 +28,14 @@ Codex never reads `CLAUDE.md`; it follows the project's `AGENTS.md` and the brie
 ## Setup
 - The model and reasoning effort come from your Codex config (`model`, `model_reasoning_effort` in `~/.codex/config.toml`). Override per environment with `CODEX_HANDOFF_MODEL` / `CODEX_HANDOFF_EFFORT`.
 - Working files live in `~/.claude/codex-handoffs/<project>/` (override: `CODEX_HANDOFF_HOME`): run dirs (auto-pruned after 3 days), `templates/`, `LESSONS.md` (rules Codex reads on every run), `ledger.tsv` (Codex tokens per run) and `tasks.tsv` (Claude vs Codex tokens per task).
+- **Sandbox: runs default to Codex's `danger-full-access` mode**, meaning Codex's commands run with no sandbox; only the brief's constraints and Claude's review of the diff bound them. The reason: on Windows, Codex's `workspace-write` sandbox fails to start whenever another Codex process (another run or the Codex app) is open, so shell commands break and parallel runs are impossible. To keep the sandbox, set `CODEX_HANDOFF_SANDBOX=workspace-write` (and run one handoff at a time on Windows).
+- Permissions: in Claude Code's auto mode, launching an unsandboxed agent can be blocked. Allow the wrapper in `~/.claude/settings.json` (merge with your existing settings):
+  ```json
+  {
+    "permissions": { "allow": ["Bash(bash ~/.claude/skills/codex-handoff/scripts/handoff.sh *)"] },
+    "autoMode": { "allow": ["$defaults", "Running the codex-handoff wrapper (bash ~/.claude/skills/codex-handoff/scripts/handoff.sh ...) to launch, resume, check, cancel or clean local Codex CLI runs, including with --sandbox danger-full-access."] }
+  }
+  ```
 - Model fallback: if the configured model is unavailable, the wrapper tries `CODEX_HANDOFF_FALLBACK_MODELS` (comma list) or the catalog from `codex debug models` in priority order, and remembers the working one for 24 h.
 - Check readiness: `bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --check [--probe]`. Exit codes: 0 ready, 69 not installed, 70 not logged in, 71 no usable model, 2 usage-limited until the recorded reset. The model probe is cached 12 h; `--probe` forces it. When Codex is unusable, Claude simply does the work itself.
 

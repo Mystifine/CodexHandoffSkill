@@ -14,7 +14,7 @@ set -uo pipefail
 # Model and effort default to the user's Codex config (~/.codex/config.toml); override per run or by env.
 MODEL="${CODEX_HANDOFF_MODEL:-}"
 EFFORT="${CODEX_HANDOFF_EFFORT:-}"
-SANDBOX="workspace-write"
+SANDBOX="${CODEX_HANDOFF_SANDBOX:-danger-full-access}"  # see SKILL.md "Sandbox"; set workspace-write to sandbox runs
 CWD="$PWD"
 TIMEOUT_MIN=180
 BRIEF=""
