@@ -78,7 +78,7 @@ The review patch captures before/after Git trees, including content of already-u
 |---|---|
 | 0 | Completed or ready; review the result |
 | 1 | Failed; inspect summary and relevant log tail |
-| 2 | Usage-limited; run `--wait` in the background or use Claude |
+| 2 | Usage-limited. Mid-run, Claude starts `--wait` in the background by default and resumes on reset unless you ask it to finish; before any run, Claude does the work |
 | 3 | Timed out; inspect partial work before resuming |
 | 4 | Blocked, cancelled, or needs review; inspect the report |
 | 64 | Invalid arguments or incompatible checkout |
