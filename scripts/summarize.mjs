@@ -5,6 +5,29 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appendTable, atomicWrite, loadState, readJson, stateFile, withLock, writeJson } from './state.mjs';
 
+// Codex states a reset as a delay, a date, or a bare local clock time ("try again at 5:01 PM.").
+export function limitResetAt(message, end) {
+  const units = { second: 1, minute: 60, hour: 3600, day: 86400 };
+  let wait = 0;
+  for (const [, n, unit] of message.matchAll(/(\d+)\s*(second|minute|hour|day)s?/gi)) wait += Number(n) * units[unit.toLowerCase()];
+  if (wait) return end + wait;
+  const at = message.match(/(?:try again|resets?)\s+(?:at|on)\s+(.+)/i)?.[1].replace(/(\d)(?:st|nd|rd|th)\b/gi, '$1').replace(/[.\s]+$/, '');
+  const parsed = at ? Date.parse(at) : NaN;
+  if (parsed > end * 1000) return Math.round(parsed / 1000);
+  const clock = Number.isNaN(parsed) && at?.match(/\b(\d{1,2}):(\d{2})\s*(?:([ap])\.?m\b\.?)?/i);
+  if (clock) {
+    const [hour, minute] = [Number(clock[1]), Number(clock[2])];
+    const hours = clock[3] ? (hour % 12) + (clock[3].toLowerCase() === 'p' ? 12 : 0) : hour;
+    if (hours < 24 && minute < 60 && (!clock[3] || (hour >= 1 && hour <= 12))) {
+      const reset = new Date(end * 1000);
+      reset.setHours(hours, minute, 0, 0);
+      if (reset.getTime() <= end * 1000) reset.setDate(reset.getDate() + 1);
+      return Math.round(reset.getTime() / 1000);
+    }
+  }
+  return end + 1800;
+}
+
 export async function summarize(runDir, codexExit, start, end, cwd = '') {
   const read = (name) => { try { return fs.readFileSync(path.join(runDir, name), 'utf8'); } catch (e) { if (e.code === 'ENOENT') return ''; throw e; } };
   const invocation = readJson(path.join(runDir, 'invocation.json'), {});
@@ -55,15 +78,7 @@ export async function summarize(runDir, codexExit, start, end, cwd = '') {
   else if (invocation.probe && completed && final === 'OK') [status, exit] = ['READY', 0];
   else if (!invocation.probe && completed && final && validResult && result.status === 'completed' && !result.reason.trim()) [status, exit] = ['COMPLETED', 0];
   else [status, exit] = ['NEEDS REVIEW', 4];
-  let limitUntil;
-  if (limitHit) {
-    const units = { second: 1, minute: 60, hour: 3600, day: 86400 };
-    let wait = 0;
-    for (const [, n, unit] of limitHit.matchAll(/(\d+)\s*(second|minute|hour|day)s?/gi)) wait += Number(n) * units[unit.toLowerCase()];
-    const at = limitHit.match(/(?:try again|resets?)\s+(?:at|on)\s+(.+)/i);
-    const parsed = at ? Date.parse(at[1]) : NaN;
-    limitUntil = wait ? end + wait : parsed > end * 1000 ? Math.round(parsed / 1000) : end + 1800;
-  }
+  const limitUntil = limitHit ? limitResetAt(limitHit, end) : undefined;
   const images = [];
   if (threadId && /^[A-Za-z0-9-]+$/.test(threadId)) {
     const imageDir = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'generated_images', threadId);

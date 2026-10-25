@@ -8,7 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { alive, loadState, readJson, reserve, release, safeRemove, withLock, writeJson } from '../scripts/state.mjs';
-import { summarize } from '../scripts/summarize.mjs';
+import { limitResetAt, summarize } from '../scripts/summarize.mjs';
 import { snapshot, finishSnapshot, git } from '../scripts/snapshot.mjs';
 import { cleanup } from '../scripts/cleanup.mjs';
 import { parse } from '../scripts/handoff.mjs';
@@ -100,6 +100,16 @@ test('completion requires a task result, completed turn, and successful infrastr
     const report = await summarize(reportFixture(f, name, events, taskResult), 0, now, now, f.cwd);
     assert.equal(report.exit, expected, name);
   }
+});
+test('usage limit resets honor stated delays, dates and local clock times', () => {
+  const local = (h, m, day = 25) => Math.round(new Date(2026, 9, day, h, m).getTime() / 1000);
+  const stated = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at 5:01 PM.";
+  assert.equal(limitResetAt(stated, local(14, 0)), local(17, 1));
+  assert.equal(limitResetAt(stated, local(17, 30)), local(17, 1, 26));
+  assert.equal(limitResetAt('usage limit: try again at 17:01', local(14, 0)), local(17, 1));
+  assert.equal(limitResetAt('usage limit: try again in 5 minutes', local(14, 0)), local(14, 5));
+  assert.equal(limitResetAt('usage limit: try again on Oct 27th, 2026 9:00 AM.', local(14, 0)), local(9, 0, 27));
+  assert.equal(limitResetAt('usage limit reached', local(14, 0)), local(14, 30));
 });
 test('simultaneous summaries preserve the longest limit and every ledger row', async (t) => {
   const f = fixture(t), now = Math.floor(Date.now() / 1000);
