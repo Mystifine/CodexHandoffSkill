@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { appendTable, atomicWrite, inside, liveReservations, loadState, readJson, safeRemove, withLock } from './state.mjs';
+import { appendTable, atomicWrite, inside, liveReservations, loadState, readJson, safeRemove, stateFile, withLock, writeJson } from './state.mjs';
 
 const subdirs = (dir) => fs.existsSync(dir) ? fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => path.join(dir, entry.name)) : [];
 export async function cleanup(root, mode, arg, claudeTokens) {
@@ -14,6 +14,10 @@ export async function cleanup(root, mode, arg, claudeTokens) {
     // Refuse thread cleanup while any resume is active, even before it has meta.json.
     if (mode === '--thread' && active.some((run) => run.thread === arg || readJson(path.join(run.runDir, 'meta.json'))?.threadId === arg)) {
       const error = new Error(`Thread ${arg} is active; cancel or wait before cleaning`); error.exitCode = 75; throw error;
+    }
+    if (mode === '--thread') {
+      const state = loadState(root);
+      if (state.pending?.[arg]) { delete state.pending[arg]; writeJson(stateFile(root), state); }
     }
     const runs = subdirs(root).flatMap((project) => subdirs(project)
       .filter((dir) => /^\d{8}-\d{6}-/.test(path.basename(dir)))

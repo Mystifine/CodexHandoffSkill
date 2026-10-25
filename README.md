@@ -54,7 +54,11 @@ bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --brief "/tmp/task-b.md" 
 
 MCP servers are **opt-in per invocation**. For example, add `--mcp blender` or `--mcp Roblox_Studio`; their tools are approved only for that invocation, and each server is locked across cooperating handoffs. All other effective CLI-configured MCP servers are disabled for that run. For aliases that reach the same app, supply a common `--resource blender` on every caller. Keep manual/other-agent access to that live app idle while a handoff uses it. Locks cannot control apps or processes launched outside this wrapper.
 
-Resume with `--resume THREAD --cd "/original/worktree"`, repeating needed MCP/resource flags. A thread cannot be resumed concurrently, and a known thread cannot be moved to another checkout. Each resume still gets a distinct run directory. For an older/external thread whose directory is not recorded, the caller must supply its original checkout.
+Resume with `--resume THREAD --cd "/original/worktree"`, repeating needed MCP/resource flags. A thread cannot be resumed concurrently, and a known thread cannot be moved to another checkout. Each resume still gets a distinct run directory. For an older/external thread whose directory is not recorded, the caller must supply its original checkout. Every summary prints the complete follow-up command, with all the flags repeated.
+
+### Waiting out a usage limit
+
+A run that hits a usage limit records a pending resume in the handoff state. It holds the exact resume command, the brief's goal, and the director's `--note TEXT` (next steps and authorized scope). Reset times are read from the stated delay, date or local clock time ("try again at 5:01 PM"). `handoff.sh --wait`, run in the background, holds no reservation and polls the recorded limit. Once the limit resets it prints every ready resume, so the job continues even if the director's context was cleared. `--check` lists pending resumes as well. The next run of the same job, with any outcome, replaces its record; `--clean THREAD` drops it.
 
 ## Results and recovery
 
@@ -66,7 +70,7 @@ The review patch captures before/after Git trees, including content of already-u
 |---|---|
 | 0 | Completed or ready; review the result |
 | 1 | Failed; inspect summary and relevant log tail |
-| 2 | Usage-limited; wait until the recorded reset or use Claude |
+| 2 | Usage-limited; run `--wait` in the background or use Claude |
 | 3 | Timed out; inspect partial work before resuming |
 | 4 | Blocked, cancelled, or needs review; inspect the report |
 | 64 | Invalid arguments or incompatible checkout |

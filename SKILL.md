@@ -11,7 +11,9 @@ Claude decides, directs and accepts; Codex executes a written brief in a separat
 
 `bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --check` verifies install, login, remembered limits and a model reply (cached 12 h). Model fallback happens only before tools run.
 
-Exit 2/69/70/71: tell the user briefly and do the work yourself; don't retry until setup changes or the limit resets. 75: a resource is busy; do independent work, retry after its owner finishes. 3/4: inspect and send a targeted follow-up; never claim acceptance.
+Exit 2/69/70/71: tell the user briefly and do the work yourself; don't retry until setup changes or the limit resets. 75: a resource is busy; do independent work, retry after its owner finishes. 3/4: inspect and send a targeted follow-up; never claim acceptance. `--check` also lists pending resumes; act on any that are ready.
+
+**Waiting out a limit** (when the user chooses to wait): run `bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --wait` with `run_in_background: true`; never hand-write a sleep timer. When the limit resets it prints each paused job's goal, note, run directory and exact resume command, so the job continues even after `/clear`. Run that command unchanged: resuming the same brief within its recorded scope is already authorized. Anything new, and any outward action the brief doesn't authorize, still needs the user. Give every launch `--note "<after Codex: review criteria and next steps; user-authorized scope; items pending on the user>"` (≤ 1500 chars, compressed), because the note is all the director context that survives.
 
 ## 2. Orient cheaply, then brief
 
@@ -42,7 +44,7 @@ Write the brief to a unique scratch file; omit empty sections:
 - **Parallel code:** separate prepared worktrees via `--cd`, or `--worktree` (detached from a clean checkout's HEAD; excludes uncommitted and ignored inputs). Integrate each result, then remove its worktree explicitly. Concurrent writes to one checkout or overlapping `--add-dir` roots are refused.
 - **Live apps:** `--mcp <server>` enables only that configured server, exclusive across handoffs; shared services also need the same `--resource <name>` on every caller. Don't drive an app a handoff holds.
 - **Sandbox:** default `danger-full-access` is unsandboxed; briefs are not enforcement. Respect `CODEX_HANDOFF_SANDBOX`/`--sandbox`; never widen automatically. Windows sandbox setup errors report as blocked.
-- **Resume:** `--resume <thread> --cd "<original checkout>"`, repeating needed `--mcp`/`--resource`; never concurrently, never with `--worktree`.
+- **Resume:** the summary's `follow-up:` line is the complete command; swap in the follow-up brief (update `--note` if the next steps changed). Never resume concurrently or with `--worktree`.
 - **Other:** repeatable `--image FILE` / `--add-dir DIR`; `--timeout-min N` (180); `--name SLUG`; `--model`/`--effort` (keep the user's engine unless asked). `--cancel "<run dir>"` stops a run's process tree; killing the shell alone may leave Codex running.
 
 ## 4. Review and finish

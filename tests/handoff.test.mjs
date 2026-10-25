@@ -30,6 +30,7 @@ if(process.env.FAKE_CHILD) {
  fs.writeFileSync(process.env.FAKE_CHILD,String(child.pid));
 }
 await new Promise(r=>setTimeout(r,Number(process.env.FAKE_DELAY||0)));
+if(scenario==='limit') {console.log(JSON.stringify({type:'error',message:"You've hit your usage limit. Try again in 1 second."}));process.exit(1);}
 if(scenario==='model-missing'&&!args.includes('fallback-a')) {console.log(JSON.stringify({type:'error',message:'model_not_found'}));process.exit(1);}
 const probe=args.some(a=>a.includes('the two letters "OK"'));
 if(process.env.FAKE_EDIT) fs.writeFileSync(path.join(process.cwd(),process.env.FAKE_EDIT),'after\\n');
@@ -110,6 +111,27 @@ test('usage limit resets honor stated delays, dates and local clock times', () =
   assert.equal(limitResetAt('usage limit: try again in 5 minutes', local(14, 0)), local(14, 5));
   assert.equal(limitResetAt('usage limit: try again on Oct 27th, 2026 9:00 AM.', local(14, 0)), local(9, 0, 27));
   assert.equal(limitResetAt('usage limit reached', local(14, 0)), local(14, 30));
+});
+test('a usage limit records a runnable resume that --wait replays and the next run clears', async (t) => {
+  const f = fixture(t), note = "review the sheets, then run verify (user's approval: resume as-is)";
+  const words = (command) => [...command.matchAll(/'((?:[^']|'\\'')*)'|(\S+)/g)].map((m) => m[1] !== undefined ? m[1].replaceAll("'\\''", "'") : m[2]);
+  const limited = await f.launch([...f.args, '--mcp', 'blender', '--note', note], { FAKE_SCENARIO: 'limit', FAKE_SERVERS: '[{"name":"blender"}]' }).done;
+  assert.equal(limited.code, 2, limited.stderr);
+  const [entry] = Object.values(loadState(f.root).pending);
+  assert.match(limited.stdout, /resume after reset: bash /);
+  assert.equal(entry.goal, 'Perform the fixture task.');
+  const argv = words(entry.command).slice(2), resumed = parse(argv);
+  assert.equal(resumed.resume, entry.thread); assert.equal(resumed.note, note); assert.deepEqual(resumed.mcp, ['blender']);
+  assert.equal(resumed.cd, path.resolve(readJson(path.join(entry.runDir, 'invocation.json')).cwd));
+  const waiting = f.launch(['--wait']);
+  assert.equal(loadState(f.root).reservations.length, 0);
+  const woke = await waiting.done;
+  assert.equal(woke.code, 0, woke.stderr);
+  assert.ok(woke.stdout.includes(`next: ${note}`) && woke.stdout.includes(`resume: ${entry.command}`));
+  const again = await f.launch(argv, { FAKE_SERVERS: '[{"name":"blender"}]' }).done;
+  assert.equal(again.code, 0, again.stdout + again.stderr);
+  assert.deepEqual(loadState(f.root).pending, {});
+  assert.equal((await f.launch(['--wait']).done).code, 1);
 });
 test('simultaneous summaries preserve the longest limit and every ledger row', async (t) => {
   const f = fixture(t), now = Math.floor(Date.now() / 1000);

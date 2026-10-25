@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { alive, atomicWrite, canonical, inside, liveReservations, loadState, release, reserve,
   safeRemove, stateFile, updateReservation, withLock, writeJson } from './state.mjs';
@@ -16,6 +17,8 @@ const HELP = `Usage: handoff.sh --brief FILE --cd DIR [--resume THREAD] [--workt
   --sandbox MODE                danger-full-access (default), workspace-write, read-only
   --model MODEL / --effort LEVEL / --timeout-min N / --name SLUG
   --check [--probe] / --cancel RUN_DIR / --clean THREAD [--claude-tokens N]
+  --note TEXT                   director's next steps, replayed with any pending resume
+  --wait                        block until a usage-limited run can resume, then print it
   --ignore-limit                explicitly retry despite remembered usage limits
 Exit: 0 completed, 1 failed, 2 usage limit, 3 timeout, 4 blocked/needs review,
       64 arguments, 69 missing CLI, 70 login, 71 unavailable model, 75 busy`;
@@ -29,10 +32,10 @@ export function parse(argv) {
   const o = { cd: process.cwd(), sandbox: process.env.CODEX_HANDOFF_SANDBOX || 'danger-full-access',
     model: process.env.CODEX_HANDOFF_MODEL || '', effort: process.env.CODEX_HANDOFF_EFFORT || '',
     timeoutMin: 180, image: [], addDir: [], mcp: [], resource: [] };
-  const flags = { '--check': 'check', '--probe': 'probe', '--worktree': 'worktree', '--ignore-limit': 'ignoreLimit', '--help': 'help', '-h': 'help' };
+  const flags = { '--check': 'check', '--probe': 'probe', '--worktree': 'worktree', '--ignore-limit': 'ignoreLimit', '--wait': 'wait', '--help': 'help', '-h': 'help' };
   const values = { '--brief': 'brief', '--cd': 'cd', '--resume': 'resume', '--image': 'image', '--add-dir': 'addDir',
     '--sandbox': 'sandbox', '--model': 'model', '--effort': 'effort', '--timeout-min': 'timeoutMin', '--name': 'name',
-    '--cancel': 'cancel', '--clean': 'clean', '--claude-tokens': 'claudeTokens', '--mcp': 'mcp', '--resource': 'resource' };
+    '--cancel': 'cancel', '--clean': 'clean', '--claude-tokens': 'claudeTokens', '--mcp': 'mcp', '--resource': 'resource', '--note': 'note' };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (flags[arg]) o[flags[arg]] = true;
@@ -47,7 +50,8 @@ export function parse(argv) {
   o.timeoutMin = Number(o.timeoutMin);
   if (!Number.isFinite(o.timeoutMin) || o.timeoutMin <= 0 || o.timeoutMin > 1440) fail('--timeout-min must be > 0 and <= 1440');
   if (o.claudeTokens !== undefined && (!Number.isFinite(Number(o.claudeTokens)) || Number(o.claudeTokens) < 0)) fail('Invalid --claude-tokens');
-  if ([o.check, o.cancel, o.clean, o.brief].filter(Boolean).length > 1) fail('Choose one of --brief, --check, --cancel, --clean');
+  if ([o.check, o.cancel, o.clean, o.brief, o.wait].filter(Boolean).length > 1) fail('Choose one of --brief, --check, --cancel, --clean, --wait');
+  if (o.note && o.note.length > 1500) fail('--note must be at most 1500 characters; point to a file for more');
   if (o.worktree && o.resume) fail('Resume with --cd pointing to the original worktree');
   for (const key of ['cd', 'brief', 'cancel']) if (o[key]) o[key] = path.resolve(winpath(o[key]));
   for (const key of ['image', 'addDir']) o[key] = o[key].map((p) => path.resolve(winpath(p)));
@@ -165,6 +169,28 @@ async function withFallback(root, runDir, token, args, cwd, options, info) {
     model = next;
   }
 }
+function pendingResumes(state) {
+  return Object.values(state.pending || {}).filter((entry) => fs.existsSync(entry.runDir))
+    .map((entry) => ({ ...entry, until: Math.max(entry.until || 0, state.limits[entry.account]?.until || 0) }));
+}
+const describePending = (entry) => [`== ${entry.thread ? `thread ${entry.thread}` : 'unstarted run'} (${path.basename(entry.project)})`,
+  `goal: ${entry.goal || '(see brief)'}`, ...(entry.note ? [`next: ${entry.note}`] : []), `paused run: ${entry.runDir}`, `resume: ${entry.command}`].join('\n');
+// Holds no reservation, so other handoffs run normally while a timer waits.
+async function waitForReset(root) {
+  for (;;) {
+    let entries;
+    await withLock(root, () => { entries = pendingResumes(loadState(root)); });
+    if (!entries.length) fail('No pending resumes are recorded', 1);
+    const ready = entries.filter((entry) => entry.until * 1000 <= Date.now());
+    if (ready.length) {
+      console.log(['handoff: Codex usage limit has reset. This resume context survives /clear.',
+        'Authorized: run each command unchanged; it repeats its original brief and scope. Anything new or outward still needs the user.',
+        ...ready.map(describePending)].join('\n'));
+      return 0;
+    }
+    await sleep(Math.min(60000, Math.max(1000, Math.min(...entries.map((entry) => entry.until * 1000)) - Date.now() + 1000)));
+  }
+}
 async function cancel(root, dir) {
   await withLock(root, () => {
     if (!inside(root, dir)) fail('--cancel must name a run directory under the handoff home');
@@ -181,6 +207,12 @@ export async function main(argv = process.argv.slice(2)) {
   const root = path.resolve(winpath(process.env.CODEX_HANDOFF_HOME || path.join(os.homedir(), '.claude', 'codex-handoffs')));
   if (options.cancel) { await cancel(root, options.cancel); return 0; }
   if (options.clean) return cleanup(root, '--thread', options.clean, options.claudeTokens);
+  if (options.wait) return waitForReset(root);
+  if (options.check) await withLock(root, () => {
+    const entries = pendingResumes(loadState(root));
+    if (entries.length) console.log(`handoff: ${entries.length} pending resume(s):\n${entries.map((entry) =>
+      `${describePending(entry)}\nready: ${entry.until * 1000 <= Date.now() ? 'now' : new Date(entry.until * 1000).toISOString()}`).join('\n')}`);
+  });
   if (!options.check && !options.brief) fail(HELP);
   if (!fs.existsSync(options.cd) || !fs.statSync(options.cd).isDirectory()) fail('--cd directory does not exist');
   if (!options.check && (!fs.existsSync(options.brief) || !fs.statSync(options.brief).isFile())) fail('Brief file does not exist');
@@ -238,7 +270,10 @@ export async function main(argv = process.argv.slice(2)) {
     const paths = options.check ? [] : [cwd, ...options.addDir.map(canonical)];
     await reserve(root, { token, pid: process.pid, childPid: null, runDir, paths, resources, thread: options.resume || null });
     claimed = true;
-    writeJson(path.join(runDir, 'invocation.json'), { root, project, cwd, ...info, sandbox: options.check ? 'read-only' : options.sandbox, probe: !!options.check, resume: options.resume || null, mcp: options.mcp });
+    writeJson(path.join(runDir, 'invocation.json'), { root, project, cwd, ...info, sandbox: options.check ? 'read-only' : options.sandbox, probe: !!options.check, resume: options.resume || null, mcp: options.mcp,
+      // Everything resumeCommand needs to rebuild this launch.
+      brief: options.brief, resource: options.resource, addDir: options.addDir, image: options.image, model: options.model,
+      effort: options.effort, timeoutMin: options.timeoutMin, name: options.name, note: options.note });
     if (!options.check) {
       fs.copyFileSync(options.brief, path.join(runDir, 'brief.md'));
       if (checkout(cwd)) { before = snapshot(cwd, runDir, 'before'); atomicWrite(path.join(runDir, 'base.txt'), before); }

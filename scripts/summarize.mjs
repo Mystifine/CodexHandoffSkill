@@ -5,6 +5,23 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appendTable, atomicWrite, loadState, readJson, stateFile, withLock, writeJson } from './state.mjs';
 
+const quote = (value) => /^[A-Za-z0-9_.,:/=@+-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+// A complete, runnable command, so a timer's output can continue the job after /clear.
+export function resumeCommand(invocation, runDir, threadId, brief = path.join(runDir, 'brief.md')) {
+  const args = ['--brief', brief, ...(threadId ? ['--resume', threadId] : []), '--cd', invocation.cwd];
+  const repeat = { mcp: '--mcp', resource: '--resource', addDir: '--add-dir', ...(threadId ? {} : { image: '--image' }) };
+  for (const [key, flag] of Object.entries(repeat)) for (const value of invocation[key] || []) args.push(flag, value);
+  for (const [key, flag] of [['sandbox', '--sandbox'], ['model', '--model'], ['effort', '--effort'], ['name', '--name'], ['note', '--note']]) if (invocation[key]) args.push(flag, invocation[key]);
+  if (invocation.timeoutMin && invocation.timeoutMin !== 180) args.push('--timeout-min', invocation.timeoutMin);
+  return ['bash ~/.claude/skills/codex-handoff/scripts/handoff.sh', ...args.map((arg) => quote(String(arg)))].join(' ');
+}
+export function briefGoal(text) {
+  const lines = text.split(/\r?\n/), start = lines.findIndex((line) => /^##\s*Goal\b/i.test(line));
+  const end = lines.findIndex((line, i) => start >= 0 && i > start && /^#/.test(line));
+  const body = start < 0 ? lines : lines.slice(start + 1, end < 0 ? undefined : end);
+  return body.join(' ').replace(/\s+/g, ' ').trim().slice(0, 240);
+}
+
 // Codex states a reset as a delay, a date, or a bare local clock time ("try again at 5:01 PM.").
 export function limitResetAt(message, end) {
   const units = { second: 1, minute: 60, hour: 3600, day: 86400 };
@@ -88,7 +105,9 @@ export async function summarize(runDir, codexExit, start, end, cwd = '') {
     }
   }
   const seconds = Math.max(0, end - start), out = [`Codex handoff: ${status} (codex exit ${codexExit}) in ${Math.floor(seconds / 60)}m${seconds % 60}s`];
-  if (threadId) out.push(`thread: ${threadId} (follow-up: --resume ${threadId} --cd "${cwd}")`);
+  const resumable = { ...invocation, cwd: invocation.cwd || cwd };
+  const pending = limitHit && !invocation.probe ? resumeCommand(resumable, runDir, threadId) : '';
+  if (threadId) out.push(`thread: ${threadId}`, `follow-up: ${resumeCommand(resumable, runDir, threadId, '<follow-up brief>')}`);
   out.push(`run dir: ${runDir}`, `working directory: ${cwd}`);
   if (read('model.txt').trim()) out.push(`model: ${read('model.txt').trim()}`);
   out.push(`codex tokens: ${usage.input_tokens} in (${usage.cached_input_tokens} cached), ${usage.output_tokens} out`);
@@ -108,6 +127,7 @@ export async function summarize(runDir, codexExit, start, end, cwd = '') {
   capped('errors', [...new Set(errors)]);
   if (exit !== 0 && stderr.trim()) capped('stderr tail', stderr.trim().split('\n').slice(-8));
   if (limitUntil) out.push(`usage limit: blocked until ${new Date(limitUntil * 1000).toISOString()}`);
+  if (pending) out.push(`resume after reset: ${pending}`, 'timer: bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --wait (in the background; prints this resume once the limit resets)');
   out.push('--- Codex final report ---', final ? final.slice(0, 6000) : '(none)');
   const text = out.join('\n');
   await withLock(root, () => {
@@ -118,6 +138,13 @@ export async function summarize(runDir, codexExit, start, end, cwd = '') {
       if (limitUntil > (state.limits[key]?.until || 0)) state.limits[key] = { until: limitUntil, message: limitHit };
     }
     // Success NEVER clears another run's active usage limit.
+    // A later run of the same job supersedes its pending resume, whatever the outcome.
+    state.pending ||= {};
+    for (const [key, entry] of Object.entries(state.pending)) {
+      if ((threadId && entry.thread === threadId) || (!entry.thread && invocation.brief && path.resolve(invocation.brief) === path.resolve(entry.runDir, 'brief.md'))) delete state.pending[key];
+    }
+    if (pending) state.pending[threadId || runDir] = { account: invocation.accountKey || 'legacy', until: limitUntil, thread: threadId, runDir, project,
+      goal: briefGoal(read('brief.md')), note: invocation.note || '', command: pending };
     writeJson(stateFile(root), state);
     writeJson(path.join(runDir, 'meta.json'), { status, codexExit, threadId, seconds, usage, files: [...files], images, errors, result });
     atomicWrite(path.join(runDir, 'summary.txt'), text + '\n');
