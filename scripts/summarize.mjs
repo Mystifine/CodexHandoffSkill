@@ -112,7 +112,7 @@ export async function summarize(runDir, codexExit, start, end, cwd = '') {
   } catch { checkpoint = 'checkpoint.json is invalid'; }
   const resumable = { ...invocation, cwd: invocation.cwd || cwd };
   const pending = limitHit && !invocation.probe ? resumeCommand(resumable, runDir, threadId) : '';
-  if (threadId) out.push(`thread: ${threadId}`, `follow-up: ${resumeCommand(resumable, runDir, threadId, '<follow-up brief>')}`);
+  if (threadId) out.push(`thread: ${threadId}`, ...(invocation.probe ? [] : [`follow-up: ${resumeCommand(resumable, runDir, threadId, '<follow-up brief>')}`]));
   out.push(`run dir: ${runDir}`, `working directory: ${cwd}`);
   if (read('model.txt').trim()) out.push(`model: ${read('model.txt').trim()}`);
   out.push(`codex tokens: ${usage.input_tokens} in (${usage.cached_input_tokens} cached), ${usage.output_tokens} out`);
