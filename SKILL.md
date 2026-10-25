@@ -5,78 +5,56 @@ description: Delegate decided implementation work to the local Codex CLI to save
 
 # Codex handoff
 
-Claude directs and reviews; Codex executes a written brief in a separate session. Keep design, analysis, trade-offs, creative direction, and acceptance with Claude. Delegate implementation, images, modeling, animation, and mechanical work once the approach is decided. Do small edits yourself when briefing and review would cost as much as execution. Split mixed tasks at this boundary.
-
-Installation is a one-time user action documented in README.md. During ordinary execution, use the installed wrapper; do not edit the skill, settings, permissions, or sandbox to repair a failed run. Record project lessons in the handoff home instead. Outward actions (publishing, uploading, commit/push, purchases, deleting user files) require explicit user authorization stated in the brief.
+Claude decides, directs and accepts; Codex executes a written brief in a separate session. Keep design, trade-offs, creative direction and acceptance with Claude; delegate implementation, images, modeling, animation and mechanical work once decided. Do small edits yourself when briefing plus review would cost as much. Outward actions (publishing, uploading, commit/push, purchases, deleting user files) need explicit user authorization written into the brief. Never edit this skill, settings, permissions or sandbox to repair a run; record project lessons in the handoff home.
 
 ## 1. Check once per session
 
-```bash
-bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --check
-```
+`bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --check` verifies install, login, remembered limits and a model reply (cached 12 h). Model fallback happens only before tools run.
 
-This checks installation, login, remembered usage limits, and a model response (cached 12 hours per configuration). Launches check CLI/login/limits again. Model fallback is limited to pre-execution model failures; it never restarts a task after tools have begun.
+Exit 2/69/70/71: tell the user briefly and do the work yourself; don't retry until setup changes or the limit resets. 75: a resource is busy; do independent work, retry after its owner finishes. 3/4: inspect and send a targeted follow-up; never claim acceptance.
 
-For exit 2, 69, 70, or 71, tell the user briefly and do the work with Claude. Do not repeatedly retry until setup changes or the stated limit resets. Exit 75 means a resource is busy: continue independent work, then retry after its owner finishes. Exit 3 or 4 needs inspection and a targeted follow-up, not an acceptance claim.
+## 2. Orient cheaply, then brief
 
-## 2. Write a focused brief
+- Loading this skill does not replace the project's own instructions. First do CLAUDE.md/AGENTS.md start-of-task steps (such as a bounded index query), then orient only enough to decide; leave deep exploration to Codex.
+- Point to paths and rules; don't paste files or restate them. Codex reads AGENTS.md and standing lessons itself, and the wrapper appends report/result.json instructions.
+- Confirm needed skills and MCP servers exist for Codex (Claude's are not shared). Reuse approved templates from the printed project directory.
+- Critical code (persistence, migrations, payments, validation, security, auth): write explicit invariants and test cases; review every changed line.
+- Creative work: exact prompts, proportions, palette, beats, budgets, framing, transparency and paths; attach references with `--image`. UI: read [UI work](references/ui-work.md); Roblox screens: [Roblox UI](references/roblox-ui.md). Generated images: copy originals to deliverables, never move them. Blender: require asset/animation QA and review media.
 
-Decide first. Point to relevant paths and project instructions rather than pasting files. Confirm needed skills and MCP servers exist in Codex; Claude's integrations are not automatically shared. Reuse approved templates from the project directory printed by earlier runs.
-
-For persistence, migrations, payments, validation, security, or auth, write explicit invariants and test cases; review every changed line. For creative work, supply exact prompts, proportions, palette, animation beats, budgets, framing, transparency, and deliverable paths. Attach approved references with `--image`. Read [UI work](references/ui-work.md) for UI, and [Roblox UI](references/roblox-ui.md) for Roblox screens.
-
-Write the brief to a unique scratch file:
+Write the brief to a unique scratch file; omit empty sections:
 
 ```markdown
 # Task
 ## Goal
-<Concrete outcome.>
-## Context
-- Working directory: <absolute path>; follow its AGENTS.md.
-- Relevant files, approved references, and decisions: <paths and values>.
-## Requirements
-1. <Observable behavior; exact creative payload or spec when relevant.>
-## Deliverables
-- <Paths, formats, dimensions, naming.>
-## Constraints
-- Allowed edits: <paths>. Preserve: <paths>.
-- No publishing/uploading/commit/push/deleting user files/new dependencies unless authorized here: <none or exact authorization>.
-- Keep scratch and review media in the run directory.
-- If ambiguity changes the decided design, report it as blocked; otherwise choose a conservative detail and note it.
-## Verification
-- <Relevant commands, meaningful invariants, QA and expected results.>
-- Visual work: <QA skill and labeled contact sheet, max 1600 px wide>.
-## Report
-Under 250 words: result, changed files, checks and outcomes, deviations, remaining review.
-Also write the wrapper-requested result.json honestly; incomplete required checks mean blocked.
+## Context        <working dir; relevant paths, references, decisions>
+## Requirements   <observable behavior; exact spec or creative payload>
+## Deliverables   <paths, formats, sizes, names>
+## Constraints    <allowed edits; preserve; authorized outward actions or "none";
+                   scratch in run dir; if ambiguity changes the decided design report blocked,
+                   else choose conservatively and note it>
+## Verification   <commands, invariants, QA; visual work: labeled contact sheet <= 1600 px>
 ```
-
-For generated images, copy originals to deliverable paths; leave originals for thread cleanup. Do not move them. Require the relevant asset/animation QA and review media for Blender work.
 
 ## 3. Launch in the background
 
-```bash
-bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --brief "<brief>" --cd "<checkout>"
-```
+`bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --brief "<brief>" --cd "<checkout>"` with `run_in_background: true`. Keep exactly this form (the installed permission matches it); use `--cd`, not a shell prefix. Completion wakes you: prepare the next spec or review; don't poll.
 
-Use `run_in_background: true`. Keep the wrapper as its own command in this form so the installed permission matches; use `--cd` instead of a shell prefix. Completion wakes Claude: work on the next spec, invariants, or review instead of polling logs.
-
-- **Parallel code work:** use separate prepared worktrees with `--cd`, or add `--worktree` to create a detached worktree from a clean source checkout's HEAD. It excludes uncommitted and ignored inputs. Review and integrate each result before explicitly removing its worktree. Concurrent writes to one checkout or overlapping `--add-dir` roots are refused, even for disjoint files.
-- **Live apps:** enable only needed configured servers, e.g. `--mcp blender` or `--mcp Roblox_Studio`. Other configured MCP servers are disabled for that invocation. Each enabled server is exclusive across handoffs. For aliases or shared services, also use the same `--resource <name>` on every caller. Do not drive that app yourself while delegated work holds it; external app sessions cannot be locked by the wrapper.
-- **Sandbox:** default `danger-full-access` runs without a sandbox. A brief and review are instructions, not filesystem enforcement. Respect `CODEX_HANDOFF_SANDBOX` or `--sandbox`; never widen permissions automatically. Windows sandbox setup errors are reported as blocked. Separate worktrees prevent accidental checkout collisions but do not restrict an unsandboxed process.
-- **Resume:** `--resume <thread> --cd "<original checkout>"` continues the conversation there. Repeat needed `--mcp`/`--resource` flags. Never resume one thread concurrently or use `--worktree` on a resume. Known thread-directory mismatches are refused.
-
-Other options: repeatable `--image FILE` / `--add-dir DIR`; `--timeout-min N` (180 default); `--name SLUG`; `--model` / `--effort` (otherwise Codex config, with `CODEX_HANDOFF_MODEL` / `CODEX_HANDOFF_EFFORT` overrides). Keep the user's engine unless asked to change it. `--cancel "<run dir>"` asks its supervisor to stop its owned process tree; killing a background shell alone may leave Codex running.
+- **Parallel code:** separate prepared worktrees via `--cd`, or `--worktree` (detached from a clean checkout's HEAD; excludes uncommitted and ignored inputs). Integrate each result, then remove its worktree explicitly. Concurrent writes to one checkout or overlapping `--add-dir` roots are refused.
+- **Live apps:** `--mcp <server>` enables only that configured server, exclusive across handoffs; shared services also need the same `--resource <name>` on every caller. Don't drive an app a handoff holds.
+- **Sandbox:** default `danger-full-access` is unsandboxed; briefs are not enforcement. Respect `CODEX_HANDOFF_SANDBOX`/`--sandbox`; never widen automatically. Windows sandbox setup errors report as blocked.
+- **Resume:** `--resume <thread> --cd "<original checkout>"`, repeating needed `--mcp`/`--resource`; never concurrently, never with `--worktree`.
+- **Other:** repeatable `--image FILE` / `--add-dir DIR`; `--timeout-min N` (180); `--name SLUG`; `--model`/`--effort` (keep the user's engine unless asked). `--cancel "<run dir>"` stops a run's process tree; killing the shell alone may leave Codex running.
 
 ## 4. Review and finish
 
-The summary gives the task status, thread, working directory, usage, verification claim, changed files, and review artifacts. `COMPLETED` requires a completed turn and a valid `result.json` claiming all requirements were satisfied; Claude still checks acceptance. Missing results, infrastructure failures, and unavailable review evidence keep the run unaccepted.
+The summary shows status, thread, directory, usage, verification claim, changed files and review artifacts. COMPLETED needs a finished turn and a valid result.json claiming every requirement; you still decide acceptance. Missing results, infrastructure failures or missing review evidence mean unaccepted.
 
-- Code: inspect `changes.patch`, then run project verification. The patch captures tracked and pre-existing untracked content without changing the real index. It describes all checkout edits during the run, including human/external edits; attribution is not guaranteed. Ignored files and edits outside the checkout need separate review when permitted by the brief.
-- Visuals: compare the contact sheet with the exact payload; inspect full-size views where needed. A model's claim to have inspected images is insufficient.
-- Fix round: brief concrete defects with expected results and resume the thread. If the same defect survives two attempts, fix the remainder with Claude.
-- Finish: save a reusable approved brief in the printed project directory's `templates/`; add a short rule to `LESSONS.md` for a demonstrated mistake. Keep these project notes outside the installed skill.
-- Clean reviewed tasks: `bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --clean <thread> [--claude-tokens N]`. Use measured Claude usage if available; otherwise omit it. Cleanup preserves worktrees and refuses active threads. Delete only scratch files positively identified as created by the task; preserve other untracked files.
-- Tell the user what changed, how it was verified, and any remaining work.
+- **Code:** read `changes.patch` (every checkout edit during the run, tracked and pre-existing untracked; attribution not guaranteed), then run project verification. Ignored files and permitted outside edits need separate review.
+- **Visuals:** compare the contact sheet with the exact payload; open full-size views where needed. Codex saying it looked is not evidence.
+- **Fix round:** brief concrete defects with expected results and resume. Same defect after two attempts: fix it yourself.
+- **Post-change steps:** after all accepted work is integrated (merges, fix rounds, your own edits), do the project's end-of-task steps from CLAUDE.md/AGENTS.md once in the main checkout, unless they assign them to Codex.
+- **Notes:** save reusable approved briefs in the project directory's `templates/`; add a one-line rule to `LESSONS.md` for a demonstrated mistake.
+- **Clean:** `bash ~/.claude/skills/codex-handoff/scripts/handoff.sh --clean <thread> [--claude-tokens N]` (measured usage only). It preserves worktrees and refuses active threads. Delete only scratch positively attributed to the task.
+- Tell the user what changed, how it was verified, and what remains.
 
-Working files live under `~/.claude/codex-handoffs` (`CODEX_HANDOFF_HOME` override), in project directories keyed by canonical repository path. Runs print the exact directory. Keep the same handoff home across cooperating sessions. Exit codes: 0 completed/ready; 1 failed; 2 usage limit; 3 timed out; 4 blocked/cancelled/needs review; 64 arguments; 69 CLI/config unavailable; 70 login; 71 model unavailable; 75 busy. Failed runs retain logs; open only the summary and relevant log tails when diagnosing.
+Files live in `~/.claude/codex-handoffs` (`CODEX_HANDOFF_HOME`), per project keyed by canonical repo path; runs print the exact directory. Exit codes: 0 ok/ready; 1 failed; 2 usage limit; 3 timeout; 4 blocked/cancelled/needs review; 64 arguments; 69 CLI/config; 70 login; 71 model; 75 busy. On failure read only the summary and relevant log tails.
