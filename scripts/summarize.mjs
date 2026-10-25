@@ -1,168 +1,118 @@
-// Condense a `codex exec --json` event log into a short report, so Claude never has to read the raw log.
-// Usage: node summarize.mjs <runDir> <codexExitCode> <startEpoch> <endEpoch> <cwd>
+// A successful CLI turn is not proof that the delegated task completed.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { appendTable, atomicWrite, loadState, readJson, stateFile, withLock, writeJson } from './state.mjs';
 
-const [runDir, rawCode, rawStart, rawEnd, cwd = ''] = process.argv.slice(2);
-const codexExit = Number(rawCode);
-const start = Number(rawStart);
-const end = Number(rawEnd);
-const FINAL_LIMIT = 6000;
-
-const read = (name) => {
-  try {
-    return fs.readFileSync(path.join(runDir, name), 'utf8');
-  } catch {
-    return '';
+export async function summarize(runDir, codexExit, start, end, cwd = '') {
+  const read = (name) => { try { return fs.readFileSync(path.join(runDir, name), 'utf8'); } catch (e) { if (e.code === 'ENOENT') return ''; throw e; } };
+  const invocation = readJson(path.join(runDir, 'invocation.json'), {});
+  const root = invocation.root || path.dirname(path.dirname(runDir));
+  const project = invocation.project || path.dirname(runDir);
+  let threadId = invocation.resume || null, turnFailed = '', completed = false;
+  const usage = { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 }, errors = [], files = new Set(), mcp = new Map();
+  let commands = 0, nonZero = 0, toolText = '';
+  for (const line of read('events.jsonl').split('\n')) {
+    if (!line.trim()) continue;
+    let event;
+    try { event = JSON.parse(line); } catch { errors.push('Malformed event log'); continue; }
+    if (event.type === 'thread.started') threadId = event.thread_id;
+    if (event.type === 'turn.completed') { completed = true; for (const key of Object.keys(usage)) usage[key] += event.usage?.[key] || 0; }
+    if (event.type === 'turn.failed') turnFailed = event.error?.message || 'turn failed';
+    if (event.type === 'error') errors.push(event.message || 'CLI error');
+    if (event.type !== 'item.completed') continue;
+    const item = event.item || {};
+    if (item.type === 'command_execution') {
+      commands++; if (item.exit_code != null && item.exit_code !== 0) nonZero++;
+      // Scan failed tools, not successful grep output containing quoted diagnostics.
+      if (item.exit_code !== 0) toolText += `\n${item.aggregated_output || ''}`;
+    } else if (item.type === 'file_change' && item.status !== 'failed') {
+      for (const change of item.changes || []) files.add(change.path);
+    } else if (item.type === 'mcp_tool_call') {
+      const key = `${item.server}.${item.tool}${item.status === 'failed' ? ' (failed)' : ''}`;
+      mcp.set(key, (mcp.get(key) || 0) + 1);
+      if (item.status === 'failed') toolText += `\n${JSON.stringify(item.error || item.result || '')}`;
+    } else if (item.type === 'error') errors.push(item.message || 'tool error');
   }
-};
-
-let threadId = null;
-let turnFailed = null;
-const usage = { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 };
-const errors = [];
-const files = new Map();
-const mcpCalls = new Map();
-let commands = 0;
-let nonZero = 0;
-
-for (const line of read('events.jsonl').split('\n')) {
-  if (!line.trim()) continue;
-  let ev;
-  try {
-    ev = JSON.parse(line);
-  } catch {
-    continue;
+  const final = read('final.md').trim(), stderr = read('stderr.log');
+  if (turnFailed) errors.push(turnFailed);
+  const errorText = [...errors, stderr].join('\n');
+  const limitHit = errorText.match(/[^\n]*(?:usage limit|rate limit|quota)[^\n]*/i)?.[0];
+  const modelHit = /model_not_found|model is not supported|model .{0,60}does not exist|access to (the )?model/i.test(errorText);
+  const infrastructureFailure = /helper_unknown_error|setup refresh had errors|requires approval,? but approval policy is never/i.test(`${errorText}\n${toolText}`);
+  let result;
+  try { result = readJson(path.join(runDir, 'result.json')); } catch { errors.push('Invalid result.json'); }
+  const validResult = result && ['completed', 'blocked', 'failed'].includes(result.status) && typeof result.verification === 'string' && result.verification.trim() && typeof result.reason === 'string';
+  let status, exit;
+  if ([124, 137].includes(Number(codexExit))) [status, exit] = ['TIMED OUT', 3];
+  else if (Number(codexExit) === 130) [status, exit] = ['CANCELLED', 4];
+  else if (limitHit) [status, exit] = ['CODEX USAGE LIMIT', 2];
+  else if (modelHit) [status, exit] = ['NO USABLE MODEL', 71];
+  else if (infrastructureFailure || (validResult && result.status === 'blocked')) [status, exit] = ['BLOCKED', 4];
+  else if (Number(codexExit) !== 0 || turnFailed || errors.length || (validResult && result.status === 'failed')) [status, exit] = ['FAILED', 1];
+  else if (read('snapshot-error.txt')) [status, exit] = ['NEEDS REVIEW', 4];
+  else if (invocation.probe && completed && final === 'OK') [status, exit] = ['READY', 0];
+  else if (!invocation.probe && completed && final && validResult && result.status === 'completed' && !result.reason.trim()) [status, exit] = ['COMPLETED', 0];
+  else [status, exit] = ['NEEDS REVIEW', 4];
+  let limitUntil;
+  if (limitHit) {
+    const units = { second: 1, minute: 60, hour: 3600, day: 86400 };
+    let wait = 0;
+    for (const [, n, unit] of limitHit.matchAll(/(\d+)\s*(second|minute|hour|day)s?/gi)) wait += Number(n) * units[unit.toLowerCase()];
+    const at = limitHit.match(/(?:try again|resets?)\s+(?:at|on)\s+(.+)/i);
+    const parsed = at ? Date.parse(at[1]) : NaN;
+    limitUntil = wait ? end + wait : parsed > end * 1000 ? Math.round(parsed / 1000) : end + 1800;
   }
-  if (ev.type === 'thread.started') threadId = ev.thread_id;
-  else if (ev.type === 'turn.completed') {
-    for (const k of Object.keys(usage)) usage[k] += ev.usage?.[k] ?? 0;
-  } else if (ev.type === 'turn.failed') turnFailed = ev.error?.message ?? 'turn failed';
-  else if (ev.type === 'error') errors.push(ev.message);
-  else if (ev.type === 'item.completed') {
-    const it = ev.item ?? {};
-    if (it.type === 'command_execution') {
-      commands++;
-      if (it.exit_code != null && it.exit_code !== 0) nonZero++;
-    } else if (it.type === 'file_change' && it.status !== 'failed') {
-      for (const c of it.changes ?? []) files.set(c.path, c.kind);
-    } else if (it.type === 'mcp_tool_call') {
-      const key = `${it.server}.${it.tool}${it.status === 'failed' ? ' (failed)' : ''}`;
-      mcpCalls.set(key, (mcpCalls.get(key) ?? 0) + 1);
-    } else if (it.type === 'error') errors.push(it.message);
-  }
-}
-
-// Image generation writes to $CODEX_HOME/generated_images/<thread id>/; list what this run produced.
-const images = [];
-if (threadId) {
-  const dir = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'generated_images', threadId);
-  try {
-    for (const f of fs.readdirSync(dir)) {
-      const p = path.join(dir, f);
-      if (fs.statSync(p).mtimeMs / 1000 >= start - 5) images.push(p);
+  const images = [];
+  if (threadId && /^[A-Za-z0-9-]+$/.test(threadId)) {
+    const imageDir = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'generated_images', threadId);
+    if (fs.existsSync(imageDir)) for (const file of fs.readdirSync(imageDir)) {
+      const image = path.join(imageDir, file);
+      if (fs.statSync(image).mtimeMs >= (start - 5) * 1000) images.push(image);
     }
-  } catch {}
+  }
+  const seconds = Math.max(0, end - start), out = [`Codex handoff: ${status} (codex exit ${codexExit}) in ${Math.floor(seconds / 60)}m${seconds % 60}s`];
+  if (threadId) out.push(`thread: ${threadId} (follow-up: --resume ${threadId} --cd "${cwd}")`);
+  out.push(`run dir: ${runDir}`, `working directory: ${cwd}`);
+  if (read('model.txt').trim()) out.push(`model: ${read('model.txt').trim()}`);
+  out.push(`codex tokens: ${usage.input_tokens} in (${usage.cached_input_tokens} cached), ${usage.output_tokens} out`);
+  if (commands) out.push(`commands: ${commands} run, ${nonZero} non-zero exits`);
+  const capped = (title, entries, max = 20) => {
+    if (entries.length) out.push(`${title}:`, ...entries.slice(0, max).map((entry) => `  ${entry}`), ...(entries.length > max ? [`  ... ${entries.length - max} more`] : []));
+  };
+  const changes = read('git-changes.txt').trim();
+  if (changes) { capped('checkout changes during run (includes concurrent external edits)', changes.split('\n'), 40); out.push(`review patch: ${path.join(runDir, 'changes.patch')}`); }
+  else capped('tool-reported file changes', [...files]);
+  if (read('snapshot-error.txt')) out.push(`snapshot failed: ${read('snapshot-error.txt')}`);
+  if (!invocation.probe && !validResult) out.push('result.json missing or invalid; completion is unconfirmed.');
+  if (validResult) out.push(`verification: ${result.verification}`, ...(result.reason ? [`remaining work: ${result.reason}`] : []));
+  if (mcp.size) out.push(`mcp calls: ${[...mcp].map(([key, count]) => `${key} x${count}`).join(', ')}`);
+  capped('generated image originals', images);
+  capped('review media', fs.readdirSync(runDir).filter((file) => /\.(png|jpe?g|gif|webp)$/i.test(file)).map((file) => path.join(runDir, file)));
+  capped('errors', [...new Set(errors)]);
+  if (exit !== 0 && stderr.trim()) capped('stderr tail', stderr.trim().split('\n').slice(-8));
+  if (limitUntil) out.push(`usage limit: blocked until ${new Date(limitUntil * 1000).toISOString()}`);
+  out.push('--- Codex final report ---', final ? final.slice(0, 6000) : '(none)');
+  const text = out.join('\n');
+  await withLock(root, () => {
+    const state = loadState(root);
+    if (threadId) { state.threads ||= {}; state.threads[threadId] = { cwd, project, updated: Date.now() }; }
+    if (limitUntil) {
+      const key = invocation.accountKey || 'legacy';
+      if (limitUntil > (state.limits[key]?.until || 0)) state.limits[key] = { until: limitUntil, message: limitHit };
+    }
+    // Success NEVER clears another run's active usage limit.
+    writeJson(stateFile(root), state);
+    writeJson(path.join(runDir, 'meta.json'), { status, codexExit, threadId, seconds, usage, files: [...files], images, errors, result });
+    atomicWrite(path.join(runDir, 'summary.txt'), text + '\n');
+    appendTable(path.join(project, 'ledger.tsv'), 'date\tstatus\tseconds\tinput_tokens\tcached_input_tokens\toutput_tokens\tthread\trun',
+      [new Date(end * 1000).toISOString(), status, seconds, usage.input_tokens, usage.cached_input_tokens, usage.output_tokens, threadId || '', path.basename(runDir)].join('\t'));
+  });
+  return { text, exit, status, threadId };
 }
-
-const finalText = read('final.md').trim();
-const allErrors = [turnFailed, ...errors].filter(Boolean);
-const limitHit = allErrors.find((m) => /usage limit|rate limit|quota/i.test(m));
-const modelHit = allErrors.find((m) => /model_not_found|model is not supported|model .{0,60}does not exist|access to (the )?model/i.test(m));
-const modelUsed = read('model.txt').trim();
-const fallbackNotes = read('fallback.txt').trim();
-
-let status;
-let exit;
-if (codexExit === 124 || codexExit === 137) [status, exit] = ['TIMED OUT', 3];
-else if (limitHit) [status, exit] = ['CODEX USAGE LIMIT', 2];
-else if (modelHit) [status, exit] = ['NO USABLE MODEL', 71];
-else if (codexExit === 0 && !turnFailed && finalText) [status, exit] = ['COMPLETED', 0];
-else [status, exit] = ['FAILED', 1];
-
-// Remember a usage limit so the next launch fails in its preflight instead of after a brief.
-const limitFile = path.join(path.dirname(path.dirname(runDir)), '.usage-limit');
-let limitUntil = null;
-if (limitHit) {
-  const units = { second: 1, minute: 60, hour: 3600, day: 86400 };
-  let wait = 0;
-  for (const [, n, unit] of limitHit.matchAll(/(\d+)\s*(second|minute|hour|day)s?/gi)) wait += Number(n) * units[unit.toLowerCase()];
-  const at = limitHit.match(/(?:try again|resets?)\s+(?:at|on)\s+([^.;]+)/i);
-  const parsed = at ? Date.parse(at[1]) : NaN;
-  // Unknown reset time: block for 30 minutes, then let the next launch try again.
-  limitUntil = wait > 0 ? end + wait : !Number.isNaN(parsed) && parsed / 1000 > end ? Math.round(parsed / 1000) : end + 1800;
-  fs.writeFileSync(limitFile, `until=${limitUntil}\nmessage=${limitHit.replace(/\s+/g, ' ').slice(0, 300)}\n`);
-} else if (status === 'COMPLETED') {
-  fs.rmSync(limitFile, { force: true });
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const [dir, code, start, end, cwd] = process.argv.slice(2);
+  summarize(dir, Number(code), Number(start), Number(end), cwd).then((report) => { console.log(report.text); process.exitCode = report.exit; })
+    .catch((error) => { console.error(error.message); process.exitCode = error.exitCode || 1; });
 }
-
-const rel = (p) => {
-  const norm = p.replace(/\\/g, '/');
-  const base = cwd.replace(/\\/g, '/').replace(/\/$/, '') + '/';
-  return cwd && norm.toLowerCase().startsWith(base.toLowerCase()) ? norm.slice(base.length) : norm;
-};
-const fmtK = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : `${n}`);
-const secs = Math.max(0, end - start);
-
-const out = [];
-out.push(`Codex handoff: ${status} (codex exit ${codexExit}) in ${Math.floor(secs / 60)}m${secs % 60}s`);
-if (threadId) out.push(`thread: ${threadId}   (follow-up: --resume ${threadId})`);
-out.push(`run dir: ${runDir}`);
-if (modelUsed) out.push(`model: ${modelUsed}${fallbackNotes ? ' (fallback)' : ''}`);
-if (fallbackNotes) out.push(...fallbackNotes.split('\n'));
-if (usage.input_tokens || usage.output_tokens) {
-  out.push(`codex tokens: ${fmtK(usage.input_tokens)} in (${fmtK(usage.cached_input_tokens)} cached), ${fmtK(usage.output_tokens)} out`);
-}
-if (commands) out.push(`commands: ${commands} run, ${nonZero} non-zero exits`);
-// Prefer the git snapshot (catches shell-written files too); fall back to Codex's own patch events.
-const capped = (title, lines, max) => {
-  if (!lines.length) return;
-  out.push(`${title}:`, ...lines.slice(0, max).map((l) => `  ${l}`));
-  if (lines.length > max) out.push(`  ... ${lines.length - max} more`);
-};
-const lines = (name) => read(name).split('\n').map((l) => l.trimEnd()).filter(Boolean);
-const gitTracked = fs.existsSync(path.join(runDir, 'git-new-files.txt'));
-if (gitTracked) {
-  capped('repo changes during run (git diff --stat vs pre-run tree)', lines('git-changes.txt'), 40);
-  const base = read('base.txt').trim();
-  if (base && lines('git-changes.txt').length) out.push(`review diff (this run only): git diff ${base.slice(0, 12)} -- <file>`);
-  capped('new untracked files', lines('git-new-files.txt'), 30);
-  const isAbs = (p) => /^([A-Za-z]:)?[\\/]/.test(p);
-  const outside = [...files.keys()].filter((p) => isAbs(p) && rel(p) === p.replace(/\\/g, '/'));
-  capped('edited outside the repo', outside.map(rel), 20);
-} else {
-  capped('files changed', [...files].map(([p, k]) => `${k ?? 'update'}  ${rel(p)}`), 40);
-}
-if (mcpCalls.size) out.push(`mcp calls: ${[...mcpCalls].map(([k, n]) => `${k} x${n}`).join(', ')}`);
-capped('generated images (originals)', images, 20);
-let reviewMedia = [];
-try {
-  reviewMedia = fs.readdirSync(runDir).filter((f) => /\.(png|jpe?g|gif|webp)$/i.test(f)).map((f) => path.join(runDir, f));
-} catch {}
-capped('review media in run dir', reviewMedia, 10);
-if (limitUntil) out.push(`usage limit: launches are refused until ${new Date(limitUntil * 1000).toLocaleString()} (override: --ignore-limit)`);
-if (allErrors.length) out.push(`errors:`, ...[...new Set(allErrors)].slice(0, 5).map((m) => `  ${m}`));
-if (exit === 1 && !allErrors.length) {
-  const tail = read('stderr.log').trim().split('\n').slice(-8).join('\n');
-  if (tail) out.push('stderr tail:', tail);
-}
-out.push('--- Codex final report ---');
-if (!finalText) out.push('(none)');
-else if (finalText.length <= FINAL_LIMIT) out.push(finalText);
-else out.push(finalText.slice(0, FINAL_LIMIT), `... [truncated; full report: ${path.join(runDir, 'final.md')}]`);
-
-fs.writeFileSync(
-  path.join(runDir, 'meta.json'),
-  JSON.stringify({ status, codexExit, threadId, seconds: secs, usage, files: [...files.keys()], images, errors: allErrors }, null, 2),
-);
-
-// One line per run survives cleanup, so offloaded tokens can be totalled later.
-const ledger = path.join(path.dirname(runDir), 'ledger.tsv');
-if (!fs.existsSync(ledger)) fs.writeFileSync(ledger, 'date\tstatus\tseconds\tinput_tokens\tcached_input_tokens\toutput_tokens\tthread\trun\n');
-fs.appendFileSync(
-  ledger,
-  [new Date(end * 1000).toISOString(), status, secs, usage.input_tokens, usage.cached_input_tokens, usage.output_tokens, threadId ?? '', path.basename(runDir)].join('\t') + '\n',
-);
-console.log(out.join('\n'));
-process.exit(exit);
